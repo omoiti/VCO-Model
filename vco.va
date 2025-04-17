@@ -1,0 +1,78 @@
+`include "constants.vams"
+`include "disciplines.vams"
+
+module VCO (vin, vout);
+    input  vin;     // Input control voltage
+    output vout;    // Output clock signal
+    voltage vin, vout;
+
+    // Frequency parameters
+    parameter real fc          = 2G;     // Center frequency (2 GHz)
+    parameter real gain        = 200M;   // VCO gain (200 MHz/V)
+    
+    // Jitter parameters
+    parameter real jitter      = 10p;  // RMS cycle-to-cycle jitter (10 ps)
+    parameter integer seed     = 100;     // Random number generator seed
+    
+    // Output signal parameters
+    parameter real vout_amp    = 1;     // Output amplitude (1 V)
+    parameter real trise       = 1p;   // Rise time (1 ps)
+    parameter real tfall       = 1p;   // Fall time (1 ps)
+    
+    // Phase noise parameters
+    parameter real phase_noise_level  = 1e-10;  // 1/f² noise floor @ 1 MHz (1/Hz)
+    parameter real phase_noise_fm     = 1e6;     // Phase noise measurement offset (1 MHz)
+    parameter real flicker_noise_level= 1e-15;   // 1/f³ noise coefficient (1/Hz³)
+    
+    // Simulation control
+    parameter integer min_pts_update = 64;       // Min points per period
+    parameter real ttol              = 1n/2G;   // Time tolerance (0.5 ns)
+    parameter real vtol              = 1f;    // Voltage tolerance (1 fV)
+
+    // Internal Variables
+    real phase, phase_ideal, f_ideal, fout;
+    real f_noise_white, f_noise_flicker, phase_noise;
+    real dT, vout_r;
+
+    // Behavioral Model
+    analog begin
+        // Initialize parameters
+        @(initial_step) begin
+            f_ideal = fc;  // Start with center frequency
+        end
+
+        // Frequency Calculation
+        f_ideal = fc + gain * V(vin);  // Ideal frequency from input voltage
+
+        // Phase Noise Generation
+        // White noise -> 1/f² phase noise
+        f_noise_white = white_noise(2 * phase_noise_level * pow(phase_noise_fm, 2));
+        
+        // Flicker noise -> 1/f³ phase noise
+        f_noise_flicker = flicker_noise(flicker_noise_level, 2);
+        
+        // Integrate noise sources
+        phase_noise = 2 * `M_PI * idt(f_noise_white + f_noise_flicker);
+
+        // Jitter Injection
+        @(cross(phase_ideal + `M_PI/2, +1, ttol, vtol) or
+        @(cross(phase_ideal - `M_PI/2, +1, ttol, vtol)) begin
+            // Gaussian-distributed timing perturbation
+            dT = 1.414 * jitter * $rdist_normal(seed, 0, 1);
+            fout = f_ideal * (1 + dT * f_ideal);
+        end
+
+        // Phase Calculation
+        phase_ideal = 2 * `M_PI * idtmod(f_ideal, 0, 1, -0.5) - `M_PI;
+        phase = 2 * `M_PI * idtmod(fout, 0, 1, -0.5) - `M_PI + phase_noise;
+
+        // Output Waveform Generation
+        @(cross(phase + `M_PI/2, +1, ttol, vtol) or
+        @(cross(phase - `M_PI/2, +1, ttol, vtol)) begin
+            vout_r = (phase >= -`M_PI/2) && (phase <= `M_PI/2);
+        end
+
+        $bound_step(1/(min_pts_update * fout));  // Time-step control
+        V(vout) <+ transition(vout_r ? vout_amp : 0, 0, trise, tfall);
+    end
+endmodule
